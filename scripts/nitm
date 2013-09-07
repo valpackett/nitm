@@ -1,0 +1,123 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+# Copyright © 2013 Greg V <floatboth@me.com>
+#
+# This work is free. You can redistribute it and/or modify it
+# under the terms of the
+# Do What The Fuck You Want To Public License, Version 2,
+# as published by Sam Hocevar.
+# See the COPYING file for more details.
+#
+
+from stem.connection import MissingPassword, PasswordAuthFailed, AuthenticationFailure
+from stem.control import Controller
+from stem import Signal
+from difflib import Differ
+from optparse import OptionParser
+from pygments import highlight
+from pygments.lexer import DelegatingLexer
+from pygments.lexers import DiffLexer
+from pygments.lexers.web import HtmlLexer
+from pygments.formatters import TerminalFormatter
+from pygments.token import Text
+from colorama import Fore, Back, Style
+import colorama
+import StringIO
+import getpass
+import pycurl
+import errno
+import time
+import sys
+
+class HtmlDiffLexer(DelegatingLexer):
+    def __init__(self, **options):
+        super(HtmlDiffLexer, self).__init__(DiffLexer, HtmlLexer, Text, **options)
+
+def die(msg, err):
+    sys.stderr.write(msg)
+    sys.exit(err)
+
+def request(url, socks_port):
+    output = StringIO.StringIO()
+    query = pycurl.Curl()
+    query.setopt(pycurl.URL, url)
+    query.setopt(pycurl.PROXY, "127.0.0.1")
+    query.setopt(pycurl.PROXYPORT, socks_port)
+    query.setopt(pycurl.FOLLOWLOCATION, 1)
+    query.setopt(pycurl.HTTPHEADER, ['User-Agent: Mozilla/5.0 (Windows NT 6.1; WOW64; rv:22.0) Gecko/20100101 Firefox/22.0'])
+    query.setopt(pycurl.PROXYTYPE, pycurl.PROXYTYPE_SOCKS5)
+    query.setopt(pycurl.WRITEFUNCTION, output.write)
+    try:
+        query.perform()
+        return output.getvalue()
+    except pycurl.error as exc:
+        die("Unable to reach {0} ({1})".format(url, exc), errno.ECONNABORTED)
+
+parser = OptionParser(usage="Usage: %prog [options] url1 url2 ...")
+parser.add_option("-p", "--control-port", type="int",
+        dest="port", help="Tor control port", default=9151)
+parser.add_option("-w", "--password", dest="password",
+        help="Tor control password")
+parser.add_option("-r", "--requests", type="int",
+        dest="requests", help="Number of requests to make",
+        default=5)
+(options, args) = parser.parse_args()
+
+if len(args) == 0:
+    parser.print_help()
+    sys.exit()
+
+colorama.init()
+
+with Controller.from_port(port=options.port) as ctrl:
+    try:
+        ctrl.authenticate()
+    except MissingPassword:
+        if options.password:
+            pw = options.password
+        else:
+            pw = getpass.getpass("Tor control password: ")
+        try:
+            ctrl.authenticate(password=pw)
+        except PasswordAuthFailed:
+            die("Wrong password", errno.ECONNREFUSED)
+    except AuthenticationFailure as exc:
+        die("Unable to authenticate: %s" % exc,
+                errno.ECONNREFUSED)
+
+    print("\n{0}{1}Nobody {2}In {3}The {4}Middle{5} using Tor {6}.\n".format(
+        Style.BRIGHT, Fore.GREEN, Fore.BLUE, Fore.YELLOW, Fore.RED,
+        Style.RESET_ALL, ctrl.get_version()))
+
+    socks_port = int(ctrl.get_conf("SocksPort"))
+    differ = Differ()
+
+    for url in args:
+        results = []
+        print("Testing URL {0}{1}{2}...".format(Fore.BLUE, url, Style.RESET_ALL))
+        for i in range(0, options.requests):
+            print("Request {0}{1}{2} of {3}:".format(Fore.YELLOW, i+1,
+                Style.RESET_ALL, options.requests))
+            print("    requesting new identity...")
+            ctrl.signal(Signal.NEWNYM)
+            time.sleep(1)
+            print("    doing the HTTP request...")
+            results.append(request(url, socks_port))
+            print("    {0}{1}done!{2}".format(Style.BRIGHT, Fore.GREEN, Style.RESET_ALL))
+        good = True
+        for i, result in list(enumerate(results))[1:]:
+            prev_result = results[i-1]
+            if result != prev_result:
+                first = prev_result.splitlines(1)
+                second = result.splitlines(1)
+                diff = ''.join(list(differ.compare(first, second)))
+                print("Difference between requests for {0}{1}{2} found {3}{4}:-({5}".format(
+                    Fore.BLUE, url, Style.RESET_ALL, Style.BRIGHT,
+                    Fore.RED, Style.RESET_ALL))
+                print(highlight(diff, HtmlDiffLexer(), TerminalFormatter()))
+                good = False
+        if good:
+            print("Yay, {0}{1}{2} looks the same via {3}{4}{5} Tor circuits {6}:-){7}".format(
+                Fore.BLUE, url, Style.RESET_ALL, Fore.YELLOW, options.requests, Style.RESET_ALL,
+                Fore.GREEN, Style.RESET_ALL))
